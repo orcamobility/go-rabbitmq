@@ -59,7 +59,7 @@ type Publisher struct {
 
 	options PublisherOptions
 
-	done chan struct{} // closed on Close() to signal goroutines to exit
+	done chan struct{}
 }
 
 type PublisherConfirmation []*amqp.DeferredConfirmation
@@ -107,10 +107,6 @@ func NewPublisher(conn *Conn, optionFuncs ...func(*PublisherOptions)) (*Publishe
 		return nil, err
 	}
 
-	// Start flow/blocked handlers once - they self-heal on reconnection
-	go publisher.startNotifyFlowHandler()
-	go publisher.startNotifyBlockedHandler()
-
 	if options.ConfirmMode {
 		publisher.NotifyPublish(func(_ Confirmation) {
 			// set a blank handler to set the channel in confirm mode
@@ -139,6 +135,8 @@ func (publisher *Publisher) startup() error {
 	if err != nil {
 		return fmt.Errorf("declare exchange failed: %w", err)
 	}
+	go publisher.startNotifyFlowHandler()
+	go publisher.startNotifyBlockedHandler()
 	return nil
 }
 
@@ -284,7 +282,6 @@ func (publisher *Publisher) PublishWithDeferredConfirmWithContext(
 // The publisher should be discarded as it's not safe for re-use
 // Only call Close() once
 func (publisher *Publisher) Close() {
-	// Signal handler goroutines to exit
 	close(publisher.done)
 
 	// close the channel so that rabbitmq server knows that the
