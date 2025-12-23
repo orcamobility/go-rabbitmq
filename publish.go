@@ -59,7 +59,8 @@ type Publisher struct {
 
 	options PublisherOptions
 
-	done chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 type PublisherConfirmation []*amqp.DeferredConfirmation
@@ -282,18 +283,20 @@ func (publisher *Publisher) PublishWithDeferredConfirmWithContext(
 // The publisher should be discarded as it's not safe for re-use
 // Only call Close() once
 func (publisher *Publisher) Close() {
-	close(publisher.done)
+	publisher.closeOnce.Do(func() {
+		close(publisher.done)
 
-	// close the channel so that rabbitmq server knows that the
-	// publisher has been stopped.
-	err := publisher.chanManager.Close()
-	if err != nil {
-		publisher.options.Logger.Warnf("error while closing the channel: %v", err)
-	}
-	publisher.options.Logger.Infof("closing publisher...")
-	go func() {
-		publisher.closeConnectionToManagerCh <- struct{}{}
-	}()
+		// close the channel so that rabbitmq server knows that the
+		// publisher has been stopped.
+		err := publisher.chanManager.Close()
+		if err != nil {
+			publisher.options.Logger.Warnf("error while closing the channel: %v", err)
+		}
+		publisher.options.Logger.Infof("closing publisher...")
+		go func() {
+			publisher.closeConnectionToManagerCh <- struct{}{}
+		}()
+	})
 }
 
 // NotifyReturn registers a listener for basic.return methods.
