@@ -5,7 +5,7 @@ import (
 )
 
 func (publisher *Publisher) startNotifyFlowHandler() {
-	flowChan := publisher.chanManager.NotifyFlowSafe(make(chan bool))
+	notifyFlowChan := publisher.chanManager.NotifyFlowSafe(make(chan bool))
 	publisher.disablePublishDueToFlowMu.Lock()
 	publisher.disablePublishDueToFlow = false
 	publisher.disablePublishDueToFlowMu.Unlock()
@@ -14,7 +14,7 @@ func (publisher *Publisher) startNotifyFlowHandler() {
 		select {
 		case <-publisher.done:
 			return
-		case ok, open := <-flowChan:
+		case ok, open := <-notifyFlowChan:
 			if !open {
 				return
 			}
