@@ -10,16 +10,24 @@ func (publisher *Publisher) startNotifyFlowHandler() {
 	publisher.disablePublishDueToFlow = false
 	publisher.disablePublishDueToFlowMu.Unlock()
 
-	for ok := range notifyFlowChan {
-		publisher.disablePublishDueToFlowMu.Lock()
-		if ok {
-			publisher.options.Logger.Warnf("pausing publishing due to flow request from server")
-			publisher.disablePublishDueToFlow = true
-		} else {
-			publisher.disablePublishDueToFlow = false
-			publisher.options.Logger.Warnf("resuming publishing due to flow request from server")
+	for {
+		select {
+		case <-publisher.done:
+			return
+		case ok, open := <-notifyFlowChan:
+			if !open {
+				return
+			}
+			publisher.disablePublishDueToFlowMu.Lock()
+			if ok {
+				publisher.options.Logger.Warnf("pausing publishing due to flow request from server")
+				publisher.disablePublishDueToFlow = true
+			} else {
+				publisher.disablePublishDueToFlow = false
+				publisher.options.Logger.Warnf("resuming publishing due to flow request from server")
+			}
+			publisher.disablePublishDueToFlowMu.Unlock()
 		}
-		publisher.disablePublishDueToFlowMu.Unlock()
 	}
 }
 
@@ -29,15 +37,23 @@ func (publisher *Publisher) startNotifyBlockedHandler() {
 	publisher.disablePublishDueToBlocked = false
 	publisher.disablePublishDueToBlockedMu.Unlock()
 
-	for b := range blockings {
-		publisher.disablePublishDueToBlockedMu.Lock()
-		if b.Active {
-			publisher.options.Logger.Warnf("pausing publishing due to TCP blocking from server")
-			publisher.disablePublishDueToBlocked = true
-		} else {
-			publisher.disablePublishDueToBlocked = false
-			publisher.options.Logger.Warnf("resuming publishing due to TCP blocking from server")
+	for {
+		select {
+		case <-publisher.done:
+			return
+		case b, open := <-blockings:
+			if !open {
+				return
+			}
+			publisher.disablePublishDueToBlockedMu.Lock()
+			if b.Active {
+				publisher.options.Logger.Warnf("pausing publishing due to TCP blocking from server")
+				publisher.disablePublishDueToBlocked = true
+			} else {
+				publisher.disablePublishDueToBlocked = false
+				publisher.options.Logger.Warnf("resuming publishing due to TCP blocking from server")
+			}
+			publisher.disablePublishDueToBlockedMu.Unlock()
 		}
-		publisher.disablePublishDueToBlockedMu.Unlock()
 	}
 }
