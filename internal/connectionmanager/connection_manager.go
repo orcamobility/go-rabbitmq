@@ -159,13 +159,15 @@ func (connManager *ConnectionManager) reconnect() error {
 	connManager.connectionMu.Lock()
 	defer connManager.connectionMu.Unlock()
 
+	if connManager.connection != nil {
+		if err := connManager.connection.Close(); err != nil {
+			connManager.logger.Warnf("error closing connection while reconnecting: %v", err)
+		}
+	}
+
 	conn, err := dial(connManager.logger, connManager.resolver, amqp.Config(connManager.amqpConfig))
 	if err != nil {
 		return err
-	}
-
-	if err = connManager.connection.Close(); err != nil {
-		connManager.logger.Warnf("error closing connection while reconnecting: %v", err)
 	}
 
 	connManager.connection = conn

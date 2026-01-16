@@ -115,13 +115,16 @@ func (chanManager *ChannelManager) reconnectLoop() {
 func (chanManager *ChannelManager) reconnect() error {
 	chanManager.channelMu.Lock()
 	defer chanManager.channelMu.Unlock()
+
+	if chanManager.channel != nil {
+		if err := chanManager.channel.Close(); err != nil {
+			chanManager.logger.Warnf("error closing channel while reconnecting: %v", err)
+		}
+	}
+
 	newChannel, err := getNewChannel(chanManager.connManager)
 	if err != nil {
 		return err
-	}
-
-	if err = chanManager.channel.Close(); err != nil {
-		chanManager.logger.Warnf("error closing channel while reconnecting: %v", err)
 	}
 
 	chanManager.channel = newChannel
