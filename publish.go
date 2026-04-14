@@ -108,6 +108,10 @@ func NewPublisher(conn *Conn, optionFuncs ...func(*PublisherOptions)) (*Publishe
 		return nil, err
 	}
 
+	// Start flow/blocked handlers once — they self-heal on reconnection
+	go publisher.startNotifyFlowHandler()
+	go publisher.startNotifyBlockedHandler()
+
 	if options.ConfirmMode {
 		publisher.NotifyPublish(func(_ Confirmation) {
 			// set a blank handler to set the channel in confirm mode
@@ -136,8 +140,6 @@ func (publisher *Publisher) startup() error {
 	if err != nil {
 		return fmt.Errorf("declare exchange failed: %w", err)
 	}
-	go publisher.startNotifyFlowHandler()
-	go publisher.startNotifyBlockedHandler()
 	return nil
 }
 
