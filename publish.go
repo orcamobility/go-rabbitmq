@@ -105,6 +105,11 @@ func NewPublisher(conn *Conn, optionFuncs ...func(*PublisherOptions)) (*Publishe
 
 	err = publisher.startup()
 	if err != nil {
+		if closeErr := chanManager.Close(); closeErr != nil {
+			options.Logger.Warnf("error closing channel manager after failed startup: %v", closeErr)
+		}
+		// also release the dispatcher subscriber and its goroutine
+		closeCh <- struct{}{}
 		return nil, err
 	}
 

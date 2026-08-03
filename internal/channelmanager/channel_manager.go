@@ -21,6 +21,8 @@ type ChannelManager struct {
 	reconnectionCount   uint
 	reconnectionCountMu *sync.Mutex
 	dispatcher          *dispatcher.Dispatcher
+	closeCh             chan struct{}
+	closeOnce           sync.Once
 }
 
 // NewChannelManager creates a new connection manager
@@ -39,6 +41,7 @@ func NewChannelManager(connManager *connectionmanager.ConnectionManager, log log
 		reconnectionCount:   0,
 		reconnectionCountMu: &sync.Mutex{},
 		dispatcher:          dispatcher.NewDispatcher(),
+		closeCh:             make(chan struct{}),
 	}
 	go chanManager.startNotifyCancelOrClosed()
 	return &chanManager, nil
@@ -67,16 +70,25 @@ func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
 	case err := <-notifyCloseChan:
 		if err != nil {
 			chanManager.logger.Errorf("attempting to reconnect to amqp server after close with error: %v", err)
-			chanManager.reconnectLoop()
+			if !chanManager.reconnectLoop() {
+				return
+			}
 			chanManager.logger.Warnf("successfully reconnected to amqp server")
 			chanManager.dispatcher.Dispatch(err)
 		}
 		if err == nil {
 			chanManager.logger.Infof("amqp channel closed gracefully")
 		}
-	case err := <-notifyCancelChan:
+	case err, ok := <-notifyCancelChan:
+		if !ok {
+			// closing the amqp channel closes both notifiers; a zero-value
+			// receive here is shutdown, not a server-side cancel
+			return
+		}
 		chanManager.logger.Errorf("attempting to reconnect to amqp server after cancel with error: %s", err)
-		chanManager.reconnectLoop()
+		if !chanManager.reconnectLoop() {
+			return
+		}
 		chanManager.logger.Warnf("successfully reconnected to amqp server after cancel")
 		chanManager.dispatcher.Dispatch(errors.New(err))
 	}
@@ -95,19 +107,43 @@ func (chanManager *ChannelManager) incrementReconnectionCount() {
 	chanManager.reconnectionCount++
 }
 
-// reconnectLoop continuously attempts to reconnect
-func (chanManager *ChannelManager) reconnectLoop() {
+var errManagerClosed = errors.New("channel manager is closed")
+
+// reconnectLoop continuously attempts to reconnect until it succeeds or the
+// manager is closed. Returns whether a new channel was installed.
+func (chanManager *ChannelManager) reconnectLoop() bool {
 	for {
 		chanManager.logger.Infof("waiting %s seconds to attempt to reconnect to amqp server", chanManager.reconnectInterval)
-		time.Sleep(chanManager.reconnectInterval)
+		select {
+		case <-chanManager.closeCh:
+			chanManager.logger.Infof("channel manager closed, stopping reconnect loop")
+			return false
+		case <-time.After(chanManager.reconnectInterval):
+		}
 		err := chanManager.reconnect()
+		if errors.Is(err, errManagerClosed) {
+			chanManager.logger.Infof("channel manager closed, stopping reconnect loop")
+			return false
+		}
 		if err != nil {
 			chanManager.logger.Errorf("error reconnecting to amqp server: %v", err)
-		} else {
-			chanManager.incrementReconnectionCount()
-			go chanManager.startNotifyCancelOrClosed()
-			return
+			continue
 		}
+		select {
+		case <-chanManager.closeCh:
+			// Close raced the reconnect: release the channel we just opened so
+			// it doesn't hold a channel id on the connection forever.
+			chanManager.channelMu.Lock()
+			if err := chanManager.channel.Close(); err != nil {
+				chanManager.logger.Warnf("error closing channel after close raced reconnect: %v", err)
+			}
+			chanManager.channelMu.Unlock()
+			return false
+		default:
+		}
+		chanManager.incrementReconnectionCount()
+		go chanManager.startNotifyCancelOrClosed()
+		return true
 	}
 }
 
@@ -115,6 +151,12 @@ func (chanManager *ChannelManager) reconnectLoop() {
 func (chanManager *ChannelManager) reconnect() error {
 	chanManager.channelMu.Lock()
 	defer chanManager.channelMu.Unlock()
+
+	select {
+	case <-chanManager.closeCh:
+		return errManagerClosed
+	default:
+	}
 
 	if chanManager.channel != nil {
 		if err := chanManager.channel.Close(); err != nil {
@@ -131,9 +173,10 @@ func (chanManager *ChannelManager) reconnect() error {
 	return nil
 }
 
-// Close safely closes the current channel and connection
+// Close safely closes the current channel and stops any reconnect loop
 func (chanManager *ChannelManager) Close() error {
 	chanManager.logger.Infof("closing channel manager...")
+	chanManager.closeOnce.Do(func() { close(chanManager.closeCh) })
 	chanManager.channelMu.Lock()
 	defer chanManager.channelMu.Unlock()
 
