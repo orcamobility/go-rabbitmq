@@ -11,12 +11,17 @@ import (
 	"github.com/wagslane/go-rabbitmq/internal/logger"
 )
 
+// errChannelManagerClosed signals reconnectLoop that Close was called and it
+// must stop instead of installing a new channel nothing will ever close.
+var errChannelManagerClosed = errors.New("channel manager is closed")
+
 // ChannelManager -
 type ChannelManager struct {
 	logger              logger.Logger
 	channel             *amqp.Channel
 	connManager         *connectionmanager.ConnectionManager
 	channelMu           *sync.RWMutex
+	isClosed            bool // guarded by channelMu
 	reconnectInterval   time.Duration
 	reconnectionCount   uint
 	reconnectionCountMu *sync.Mutex
@@ -67,7 +72,9 @@ func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
 	case err := <-notifyCloseChan:
 		if err != nil {
 			chanManager.logger.Errorf("attempting to reconnect to amqp server after close with error: %v", err)
-			chanManager.reconnectLoop()
+			if !chanManager.reconnectLoop() {
+				return
+			}
 			chanManager.logger.Warnf("successfully reconnected to amqp server")
 			chanManager.dispatcher.Dispatch(err)
 		}
@@ -76,7 +83,9 @@ func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
 		}
 	case err := <-notifyCancelChan:
 		chanManager.logger.Errorf("attempting to reconnect to amqp server after cancel with error: %s", err)
-		chanManager.reconnectLoop()
+		if !chanManager.reconnectLoop() {
+			return
+		}
 		chanManager.logger.Warnf("successfully reconnected to amqp server after cancel")
 		chanManager.dispatcher.Dispatch(errors.New(err))
 	}
@@ -95,18 +104,24 @@ func (chanManager *ChannelManager) incrementReconnectionCount() {
 	chanManager.reconnectionCount++
 }
 
-// reconnectLoop continuously attempts to reconnect
-func (chanManager *ChannelManager) reconnectLoop() {
+// reconnectLoop continuously attempts to reconnect. It reports whether a new
+// channel was installed; false means the manager was closed and the caller
+// must not dispatch a reconnection.
+func (chanManager *ChannelManager) reconnectLoop() bool {
 	for {
 		chanManager.logger.Infof("waiting %s seconds to attempt to reconnect to amqp server", chanManager.reconnectInterval)
 		time.Sleep(chanManager.reconnectInterval)
 		err := chanManager.reconnect()
+		if errors.Is(err, errChannelManagerClosed) {
+			chanManager.logger.Infof("channel manager closed, stopping reconnect loop")
+			return false
+		}
 		if err != nil {
 			chanManager.logger.Errorf("error reconnecting to amqp server: %v", err)
 		} else {
 			chanManager.incrementReconnectionCount()
 			go chanManager.startNotifyCancelOrClosed()
-			return
+			return true
 		}
 	}
 }
@@ -115,6 +130,10 @@ func (chanManager *ChannelManager) reconnectLoop() {
 func (chanManager *ChannelManager) reconnect() error {
 	chanManager.channelMu.Lock()
 	defer chanManager.channelMu.Unlock()
+
+	if chanManager.isClosed {
+		return errChannelManagerClosed
+	}
 
 	if chanManager.channel != nil {
 		if err := chanManager.channel.Close(); err != nil {
@@ -137,12 +156,8 @@ func (chanManager *ChannelManager) Close() error {
 	chanManager.channelMu.Lock()
 	defer chanManager.channelMu.Unlock()
 
-	err := chanManager.channel.Close()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	chanManager.isClosed = true
+	return chanManager.channel.Close()
 }
 
 // NotifyReconnect adds a new subscriber that will receive error messages whenever
