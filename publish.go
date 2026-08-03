@@ -109,7 +109,9 @@ func NewPublisher(conn *Conn, optionFuncs ...func(*PublisherOptions)) (*Publishe
 			options.Logger.Warnf("error closing channel manager after failed startup: %v", closeErr)
 		}
 		// also release the dispatcher subscriber and its goroutine
-		closeCh <- struct{}{}
+		go func() {
+			closeCh <- struct{}{}
+		}()
 		return nil, err
 	}
 
