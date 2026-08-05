@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wagslane/go-rabbitmq/internal/backoff"
 )
 
 type nopLogger struct{}
@@ -16,12 +18,19 @@ func (nopLogger) Infof(string, ...interface{})  {}
 func (nopLogger) Debugf(string, ...interface{}) {}
 
 func newTestConnectionManager() *ConnectionManager {
+	return newTestConnectionManagerWithBackoff(time.Hour, time.Hour)
+}
+
+func newTestConnectionManagerWithBackoff(base, max time.Duration) *ConnectionManager {
 	return &ConnectionManager{
-		logger:              nopLogger{},
-		connectionMu:        &sync.RWMutex{},
-		ReconnectInterval:   time.Hour,
-		reconnectionCountMu: &sync.Mutex{},
-		closeCh:             make(chan struct{}),
+		logger:               nopLogger{},
+		connectionMu:         &sync.RWMutex{},
+		connectedAt:          time.Now(),
+		ReconnectInterval:    base,
+		ReconnectMaxInterval: max,
+		reconnectBackoff:     backoff.New(base, max),
+		reconnectionCountMu:  &sync.Mutex{},
+		closeCh:              make(chan struct{}),
 	}
 }
 
@@ -57,5 +66,46 @@ func TestReconnectRefusesWhenClosed(t *testing.T) {
 
 	if err := connManager.reconnect(); !errors.Is(err, errManagerClosed) {
 		t.Errorf("reconnect error = %v, want errManagerClosed", err)
+	}
+}
+
+// A connection that had been up longer than the max interval is treated as
+// healthy, so the next outage retries promptly from the base interval.
+func TestResetBackoffIfStableResetsAfterStableConnection(t *testing.T) {
+	base := 10 * time.Millisecond
+	connManager := newTestConnectionManagerWithBackoff(base, time.Second)
+	for i := 0; i < 6; i++ {
+		connManager.reconnectBackoff.Next()
+	}
+	connManager.connectedAt = time.Now().Add(-2 * time.Second)
+
+	connManager.resetBackoffIfStable()
+
+	if got := connManager.reconnectBackoff.Next(); got != base {
+		t.Errorf("next wait after reset = %v, want %v", got, base)
+	}
+}
+
+// A connection that drops almost immediately keeps the escalated interval, so a
+// flapping broker is not redialed at the base rate by the whole fleet.
+func TestResetBackoffIfStableKeepsEscalationWhenFlapping(t *testing.T) {
+	base := 10 * time.Millisecond
+	connManager := newTestConnectionManagerWithBackoff(base, time.Second)
+	for i := 0; i < 6; i++ {
+		connManager.reconnectBackoff.Next()
+	}
+	connManager.connectedAt = time.Now()
+
+	connManager.resetBackoffIfStable()
+
+	escalated := false
+	for i := 0; i < 50; i++ {
+		if connManager.reconnectBackoff.Next() > base {
+			escalated = true
+			break
+		}
+	}
+	if !escalated {
+		t.Errorf("backoff reset to base %v despite a flapping connection", base)
 	}
 }

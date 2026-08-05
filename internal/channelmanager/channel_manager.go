@@ -6,6 +6,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/wagslane/go-rabbitmq/internal/backoff"
 	"github.com/wagslane/go-rabbitmq/internal/connectionmanager"
 	"github.com/wagslane/go-rabbitmq/internal/dispatcher"
 	"github.com/wagslane/go-rabbitmq/internal/logger"
@@ -17,7 +18,9 @@ type ChannelManager struct {
 	channel             *amqp.Channel
 	connManager         *connectionmanager.ConnectionManager
 	channelMu           *sync.RWMutex
-	reconnectInterval   time.Duration
+	connectedAt         time.Time
+	stableAfter         time.Duration
+	reconnectBackoff    *backoff.Exponential
 	reconnectionCount   uint
 	reconnectionCountMu *sync.Mutex
 	dispatcher          *dispatcher.Dispatcher
@@ -26,7 +29,7 @@ type ChannelManager struct {
 }
 
 // NewChannelManager creates a new connection manager
-func NewChannelManager(connManager *connectionmanager.ConnectionManager, log logger.Logger, reconnectInterval time.Duration) (*ChannelManager, error) {
+func NewChannelManager(connManager *connectionmanager.ConnectionManager, log logger.Logger, reconnectInterval, reconnectMaxInterval time.Duration) (*ChannelManager, error) {
 	ch, err := getNewChannel(connManager)
 	if err != nil {
 		return nil, err
@@ -37,7 +40,9 @@ func NewChannelManager(connManager *connectionmanager.ConnectionManager, log log
 		connManager:         connManager,
 		channel:             ch,
 		channelMu:           &sync.RWMutex{},
-		reconnectInterval:   reconnectInterval,
+		connectedAt:         time.Now(),
+		stableAfter:         reconnectMaxInterval,
+		reconnectBackoff:    backoff.New(reconnectInterval, reconnectMaxInterval),
 		reconnectionCount:   0,
 		reconnectionCountMu: &sync.Mutex{},
 		dispatcher:          dispatcher.NewDispatcher(),
@@ -70,6 +75,7 @@ func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
 	case err := <-notifyCloseChan:
 		if err != nil {
 			chanManager.logger.Errorf("attempting to reconnect to amqp server after close with error: %v", err)
+			chanManager.resetBackoffIfStable()
 			if !chanManager.reconnectLoop() {
 				return
 			}
@@ -86,6 +92,7 @@ func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
 			return
 		}
 		chanManager.logger.Errorf("attempting to reconnect to amqp server after cancel with error: %s", err)
+		chanManager.resetBackoffIfStable()
 		if !chanManager.reconnectLoop() {
 			return
 		}
@@ -113,12 +120,13 @@ var errManagerClosed = errors.New("channel manager is closed")
 // manager is closed. Returns whether a new channel was installed.
 func (chanManager *ChannelManager) reconnectLoop() bool {
 	for {
-		chanManager.logger.Infof("waiting %s seconds to attempt to reconnect to amqp server", chanManager.reconnectInterval)
+		wait := chanManager.reconnectBackoff.Next()
+		chanManager.logger.Infof("waiting %s to attempt to reconnect to amqp server", wait)
 		select {
 		case <-chanManager.closeCh:
 			chanManager.logger.Infof("channel manager closed, stopping reconnect loop")
 			return false
-		case <-time.After(chanManager.reconnectInterval):
+		case <-time.After(wait):
 		}
 		err := chanManager.reconnect()
 		if errors.Is(err, errManagerClosed) {
@@ -170,7 +178,17 @@ func (chanManager *ChannelManager) reconnect() error {
 	}
 
 	chanManager.channel = newChannel
+	chanManager.connectedAt = time.Now()
 	return nil
+}
+
+func (chanManager *ChannelManager) resetBackoffIfStable() {
+	chanManager.channelMu.RLock()
+	stable := time.Since(chanManager.connectedAt) >= chanManager.stableAfter
+	chanManager.channelMu.RUnlock()
+	if stable {
+		chanManager.reconnectBackoff.Reset()
+	}
 }
 
 // Close safely closes the current channel and stops any reconnect loop

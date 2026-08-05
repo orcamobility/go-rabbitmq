@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wagslane/go-rabbitmq/internal/backoff"
 )
 
 type nopLogger struct{}
@@ -16,10 +18,16 @@ func (nopLogger) Infof(string, ...interface{})  {}
 func (nopLogger) Debugf(string, ...interface{}) {}
 
 func newTestChannelManager() *ChannelManager {
+	return newTestChannelManagerWithBackoff(time.Hour, time.Hour)
+}
+
+func newTestChannelManagerWithBackoff(base, max time.Duration) *ChannelManager {
 	return &ChannelManager{
 		logger:              nopLogger{},
 		channelMu:           &sync.RWMutex{},
-		reconnectInterval:   time.Hour,
+		connectedAt:         time.Now(),
+		stableAfter:         max,
+		reconnectBackoff:    backoff.New(base, max),
 		reconnectionCountMu: &sync.Mutex{},
 		closeCh:             make(chan struct{}),
 	}
@@ -58,5 +66,47 @@ func TestReconnectRefusesWhenClosed(t *testing.T) {
 
 	if err := chanManager.reconnect(); !errors.Is(err, errManagerClosed) {
 		t.Errorf("reconnect error = %v, want errManagerClosed", err)
+	}
+}
+
+// A channel that had been up longer than stableAfter is treated as healthy, so
+// the next outage retries promptly from the base interval.
+func TestResetBackoffIfStableResetsAfterStableChannel(t *testing.T) {
+	base := 10 * time.Millisecond
+	chanManager := newTestChannelManagerWithBackoff(base, time.Second)
+	for i := 0; i < 6; i++ {
+		chanManager.reconnectBackoff.Next()
+	}
+	chanManager.connectedAt = time.Now().Add(-2 * time.Second)
+
+	chanManager.resetBackoffIfStable()
+
+	if got := chanManager.reconnectBackoff.Next(); got != base {
+		t.Errorf("next wait after reset = %v, want %v", got, base)
+	}
+}
+
+// A channel that dies almost immediately keeps the escalated interval, so a
+// flapping broker is not hammered at the base rate by the whole fleet.
+func TestResetBackoffIfStableKeepsEscalationWhenFlapping(t *testing.T) {
+	base := 10 * time.Millisecond
+	max := time.Second
+	chanManager := newTestChannelManagerWithBackoff(base, max)
+	for i := 0; i < 6; i++ {
+		chanManager.reconnectBackoff.Next()
+	}
+	chanManager.connectedAt = time.Now()
+
+	chanManager.resetBackoffIfStable()
+
+	escalated := false
+	for i := 0; i < 50; i++ {
+		if chanManager.reconnectBackoff.Next() > base {
+			escalated = true
+			break
+		}
+	}
+	if !escalated {
+		t.Errorf("backoff reset to base %v despite a flapping channel", base)
 	}
 }
