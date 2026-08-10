@@ -81,8 +81,10 @@ func TestResetBackoffIfStableResetsAfterStableChannel(t *testing.T) {
 
 	chanManager.resetBackoffIfStable()
 
-	if got := chanManager.reconnectBackoff.Next(); got != base {
-		t.Errorf("next wait after reset = %v, want %v", got, base)
+	// cenkalti jitters each draw within [0.5x, 1.5x] of the interval, so
+	// "reset to base" means the next draw is around base, not exactly base.
+	if got := chanManager.reconnectBackoff.Next(); got < base/2 || got > base+base/2 {
+		t.Errorf("next wait after reset = %v, want within [%v, %v]", got, base/2, base+base/2)
 	}
 }
 
@@ -101,7 +103,7 @@ func TestResetBackoffIfStableKeepsEscalationWhenFlapping(t *testing.T) {
 
 	escalated := false
 	for i := 0; i < 50; i++ {
-		if chanManager.reconnectBackoff.Next() > base {
+		if chanManager.reconnectBackoff.Next() > base+base/2 {
 			escalated = true
 			break
 		}

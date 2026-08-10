@@ -1,25 +1,31 @@
+// Package backoff adapts github.com/cenkalti/backoff/v4 for the reconnect
+// loops: exponential growth with jitter from a base interval towards a cap,
+// never stopping, resettable once a session has proven stable.
 package backoff
 
 import (
-	"math/rand/v2"
 	"sync"
 	"time"
+
+	cenkalti "github.com/cenkalti/backoff/v4"
 )
 
-// Exponential produces delays that grow exponentially from a base interval to
-// a maximum, with full jitter: each delay is drawn uniformly from
-// [base, ceiling], where the ceiling doubles per attempt until it reaches max.
-// It is safe for concurrent use.
+// Exponential produces exponentially growing, jittered delays. It is safe
+// for concurrent use.
+//
+// Delays are drawn from [0.5x, 1.5x] of the current interval (cenkalti's
+// RandomizationFactor 0.5), where the interval doubles per attempt until it
+// reaches max — so the worst-case delay is 1.5*max. Meaningful jitter is the
+// fleet-desynchronization property this exists for: INC-2026-08-04 showed
+// that near-synchronized retries from ~1,300 NVRs re-trip the broker's
+// memory alarm during recovery (10% jitter demonstrably was not enough).
 type Exponential struct {
-	base time.Duration
-	max  time.Duration
-
-	mu      sync.Mutex
-	ceiling time.Duration
+	mu sync.Mutex
+	eb *cenkalti.ExponentialBackOff
 }
 
-// New returns an Exponential backoff over [base, max]. A non-positive base
-// defaults to one second; a max below base is raised to base.
+// New returns an Exponential backoff from base towards max. A non-positive
+// base defaults to one second; a max below base is raised to base.
 func New(base, max time.Duration) *Exponential {
 	if base <= 0 {
 		base = time.Second
@@ -27,27 +33,31 @@ func New(base, max time.Duration) *Exponential {
 	if max < base {
 		max = base
 	}
-	return &Exponential{base: base, max: max}
+	eb := cenkalti.NewExponentialBackOff()
+	eb.InitialInterval = base
+	eb.MaxInterval = max
+	eb.Multiplier = 2
+	eb.RandomizationFactor = 0.5
+	// Never give up: cenkalti's default MaxElapsedTime (15 min) makes
+	// NextBackOff return Stop (-1) once the total elapsed time is exceeded,
+	// and a reconnect loop waiting on time.After(-1) would fire immediately,
+	// turning recovery into a hot loop. Recovery must keep retrying for as
+	// long as the manager lives.
+	eb.MaxElapsedTime = 0
+	eb.Reset()
+	return &Exponential{eb: eb}
 }
 
 // Next returns the delay to wait before the next attempt.
 func (e *Exponential) Next() time.Duration {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	switch {
-	case e.ceiling == 0:
-		e.ceiling = e.base
-	case e.ceiling >= e.max/2:
-		e.ceiling = e.max
-	default:
-		e.ceiling *= 2
-	}
-	return e.base + rand.N(e.ceiling-e.base+1)
+	return e.eb.NextBackOff()
 }
 
-// Reset restores the initial state so the next delay equals base.
+// Reset restores the initial state so the next delay is drawn around base.
 func (e *Exponential) Reset() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.ceiling = 0
+	e.eb.Reset()
 }
