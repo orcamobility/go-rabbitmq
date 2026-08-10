@@ -106,6 +106,12 @@ func (consumer *Consumer) Run(handler Handler) error {
 			handlerWrapper,
 			consumer.options,
 		)
+		if errors.Is(err, errConsumerClosed) {
+			// Close() raced the recovery notification; the consumer is shut
+			// down, so stand down cleanly instead of reporting an error.
+			consumer.options.Logger.Infof("consumer closed, not restarting goroutines")
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("error restarting consumer goroutines after cancel or close: %w", err)
 		}
@@ -137,6 +143,13 @@ func (consumer *Consumer) Close() {
 func (consumer *Consumer) cleanupResources() {
 	consumer.isClosedMu.Lock()
 	defer consumer.isClosedMu.Unlock()
+	if consumer.isClosed {
+		// Already cleaned up (Close() after Run's exit path, or a double
+		// Close()). The unsubscribe below must run at most once: the
+		// dispatcher's receiver consumes exactly one message, so a second
+		// synchronous send would block forever.
+		return
+	}
 	consumer.isClosed = true
 	// close the channel so that rabbitmq server knows that the
 	// consumer has been stopped.
@@ -146,9 +159,12 @@ func (consumer *Consumer) cleanupResources() {
 	}
 
 	consumer.options.Logger.Infof("closing consumer...")
-	go func() {
-		consumer.closeConnectionToManagerCh <- struct{}{}
-	}()
+	// Synchronous on purpose: once cleanupResources returns, the dispatcher
+	// no longer holds this consumer as a subscriber, so no reconnect event
+	// can be delivered after Close() and resurrect the consumer's
+	// goroutines — the asynchronous send here was one half of the
+	// zombie-consumer race (ACB-379).
+	consumer.closeConnectionToManagerCh <- struct{}{}
 }
 
 // CloseWithContext cleans up resources and closes the consumer.
@@ -169,6 +185,9 @@ func (consumer *Consumer) CloseWithContext(ctx context.Context) {
 	consumer.cleanupResources()
 }
 
+// errConsumerClosed reports an operation on a consumer that has been closed.
+var errConsumerClosed = errors.New("consumer is closed")
+
 // startGoroutines declares the queue if it doesn't exist,
 // binds the queue to the routing key(s), and starts the goroutines
 // that will consume from the queue
@@ -178,6 +197,14 @@ func (consumer *Consumer) startGoroutines(
 ) error {
 	consumer.isClosedMu.Lock()
 	defer consumer.isClosedMu.Unlock()
+	if consumer.isClosed {
+		// A reconnect event raced Close(): re-declaring topology and
+		// re-registering a consume here would resurrect a consumer that was
+		// deliberately shut down, competing with its replacement for
+		// deliveries on a channel nobody will ever close — the
+		// INC-2026-08-04 "zombie consumer" (ACB-379).
+		return errConsumerClosed
+	}
 	err := consumer.chanManager.QosSafe(
 		options.QOSPrefetch,
 		0,
