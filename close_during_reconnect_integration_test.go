@@ -51,7 +51,10 @@ func waitForBrokerReady(t *testing.T, containerID string) {
 	t.Helper()
 	// await_startup blocks until the broker is ready, but errors outright if
 	// the Erlang VM has not come up yet — so retry it until the deadline.
-	deadline := time.Now().Add(90 * time.Second)
+	// The deadline is generous because `go test ./...` runs packages in
+	// parallel, and several broker containers booting at once (plus the race
+	// detector) can slow a single startup well past its usual few seconds.
+	deadline := time.Now().Add(180 * time.Second)
 	var lastOut []byte
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -61,6 +64,9 @@ func waitForBrokerReady(t *testing.T, containerID string) {
 			return
 		}
 		time.Sleep(time.Second)
+	}
+	if logs, err := exec.Command("docker", "logs", "--tail", "40", containerID).CombinedOutput(); err == nil {
+		t.Logf("broker container logs:\n%s", logs)
 	}
 	t.Fatalf("broker did not become ready: %v\n%s", lastErr, lastOut)
 }
