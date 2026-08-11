@@ -28,6 +28,8 @@ func TestCloseSubscriber(t *testing.T) {
 	_, closeCh := d.AddSubscriber()
 	close(closeCh)
 	time.Sleep(time.Millisecond)
+	d.subscribersMu.Lock()
+	defer d.subscribersMu.Unlock()
 	if len(d.subscribers) != 0 {
 		t.Error("Dispatcher subscribers length is not 0")
 	}
