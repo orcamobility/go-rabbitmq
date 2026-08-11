@@ -257,16 +257,12 @@ func (consumer *Consumer) getIsClosed() bool {
 func handlerGoroutine(consumer *Consumer, msgs <-chan amqp.Delivery, consumeOptions ConsumerOptions, handler Handler) {
 	for msg := range msgs {
 		if consumer.getIsClosed() {
-			if !consumeOptions.RabbitConsumerOptions.AutoAck {
-				// This delivery is already in hand; leaving it unacked pins
-				// it invisibly on the channel (delivered-unacked messages
-				// are exempt from queue TTL) until the channel dies —
-				// observed in production as "NVR ignores commands". Requeue
-				// it for the replacement consumer.
-				if err := msg.Nack(false, true); err != nil {
-					consumer.options.Logger.Warnf("can't nack message on closed consumer: %v", err)
-				}
-			}
+			// No nack needed (or possible): isClosed only becomes observable
+			// after cleanupResources has closed the channel under the same
+			// mutex, and closing the channel makes the broker requeue its
+			// unacked deliveries. Buffered messages on a graceful close are
+			// already NackRequeue'd by the handler wrapper's TryRLock path
+			// before the channel goes down.
 			break
 		}
 
