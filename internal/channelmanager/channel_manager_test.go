@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/wagslane/go-rabbitmq/internal/backoff"
 )
 
@@ -66,6 +67,22 @@ func TestReconnectRefusesWhenClosed(t *testing.T) {
 
 	if err := chanManager.reconnect(); !errors.Is(err, errManagerClosed) {
 		t.Errorf("reconnect error = %v, want errManagerClosed", err)
+	}
+}
+
+func TestWaitForChannelNotificationPreservesAbnormalClose(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		want := &amqp.Error{Code: 501, Reason: "connection reset"}
+		notifyClose := make(chan *amqp.Error, 1)
+		notifyClose <- want
+		close(notifyClose)
+		notifyCancel := make(chan string)
+		close(notifyCancel)
+
+		got := waitForChannelNotification(notifyClose, notifyCancel)
+		if got.cancelled || got.closeErr != want {
+			t.Fatalf("notification = %+v, want abnormal close %v", got, want)
+		}
 	}
 }
 

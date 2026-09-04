@@ -71,8 +71,9 @@ func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
 	notifyCloseChan := chanManager.channel.NotifyClose(make(chan *amqp.Error, 1))
 	notifyCancelChan := chanManager.channel.NotifyCancel(make(chan string, 1))
 
-	select {
-	case err := <-notifyCloseChan:
+	notification := waitForChannelNotification(notifyCloseChan, notifyCancelChan)
+	if !notification.cancelled {
+		err := notification.closeErr
 		if err != nil {
 			chanManager.logger.Errorf("attempting to reconnect to amqp server after close with error: %v", err)
 			chanManager.resetBackoffIfStable()
@@ -85,19 +86,36 @@ func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
 		if err == nil {
 			chanManager.logger.Infof("amqp channel closed gracefully")
 		}
-	case err, ok := <-notifyCancelChan:
-		if !ok {
-			// closing the amqp channel closes both notifiers; a zero-value
-			// receive here is shutdown, not a server-side cancel
-			return
+		return
+	}
+
+	chanManager.logger.Errorf("attempting to reconnect to amqp server after cancel with error: %s", notification.cancelTag)
+	chanManager.resetBackoffIfStable()
+	if !chanManager.reconnectLoop() {
+		return
+	}
+	chanManager.logger.Warnf("successfully reconnected to amqp server after cancel")
+	chanManager.dispatcher.Dispatch(errors.New(notification.cancelTag))
+}
+
+type channelNotification struct {
+	closeErr  *amqp.Error
+	cancelTag string
+	cancelled bool
+}
+
+func waitForChannelNotification(notifyClose <-chan *amqp.Error, notifyCancel <-chan string) channelNotification {
+	select {
+	case err := <-notifyClose:
+		return channelNotification{closeErr: err}
+	case tag, ok := <-notifyCancel:
+		if ok {
+			return channelNotification{cancelTag: tag, cancelled: true}
 		}
-		chanManager.logger.Errorf("attempting to reconnect to amqp server after cancel with error: %s", err)
-		chanManager.resetBackoffIfStable()
-		if !chanManager.reconnectLoop() {
-			return
-		}
-		chanManager.logger.Warnf("successfully reconnected to amqp server after cancel")
-		chanManager.dispatcher.Dispatch(errors.New(err))
+		// amqp091-go closes NotifyClose before NotifyCancel on every channel
+		// shutdown. Preserve an abnormal close error when both are ready instead
+		// of randomly treating the closed cancel notifier as graceful shutdown.
+		return channelNotification{closeErr: <-notifyClose}
 	}
 }
 
