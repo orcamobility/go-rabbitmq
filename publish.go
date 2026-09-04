@@ -130,21 +130,54 @@ func NewPublisher(conn *Conn, optionFuncs ...func(*PublisherOptions)) (*Publishe
 		})
 	}
 
-	go func() {
-		for err := range publisher.reconnectErrCh {
-			publisher.options.Logger.Infof("successful publisher recovery from: %v", err)
-			err := publisher.startup()
-			if err != nil {
-				publisher.options.Logger.Fatalf("error on startup for publisher after cancel or close: %v", err)
-				publisher.options.Logger.Fatalf("publisher closing, unable to recover")
-				return
-			}
-			publisher.startReturnHandler()
-			publisher.startPublishHandler()
-		}
-	}()
+	go publisher.handleReconnects()
 
 	return publisher, nil
+}
+
+func (publisher *Publisher) handleReconnects() {
+	for {
+		select {
+		case <-publisher.done:
+			return
+		case err, ok := <-publisher.reconnectErrCh:
+			if !ok || !publisher.recoverAfterReconnect(err) {
+				return
+			}
+		}
+	}
+}
+
+func (publisher *Publisher) recoverAfterReconnect(reconnectErr error) bool {
+	if publisher.isClosed() {
+		return false
+	}
+
+	publisher.options.Logger.Infof("successful publisher recovery from: %v", reconnectErr)
+	err := publisher.startup()
+	if err != nil {
+		if publisher.isClosed() {
+			return false
+		}
+		publisher.options.Logger.Fatalf("error on startup for publisher after cancel or close: %v", err)
+		publisher.options.Logger.Fatalf("publisher closing, unable to recover")
+		return false
+	}
+	if publisher.isClosed() {
+		return false
+	}
+	publisher.startReturnHandler()
+	publisher.startPublishHandler()
+	return true
+}
+
+func (publisher *Publisher) isClosed() bool {
+	select {
+	case <-publisher.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (publisher *Publisher) startup() error {

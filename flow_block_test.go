@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -100,6 +101,17 @@ func TestPublisherConsumeBlockingsStopsOnClose(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("consumeBlockings did not return after publisher close")
+	}
+}
+
+func TestPublisherDoesNotRecoverAfterClose(t *testing.T) {
+	publisher := newFlowBlockTestPublisher()
+	close(publisher.done)
+
+	// A reconnect dispatch can already be in flight when Close closes done.
+	// The nil channel manager makes any attempted startup fail this test loudly.
+	if publisher.recoverAfterReconnect(errors.New("reconnected")) {
+		t.Fatal("closed publisher accepted a reconnect dispatch")
 	}
 }
 
