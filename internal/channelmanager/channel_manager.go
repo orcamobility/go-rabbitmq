@@ -113,8 +113,10 @@ func waitForChannelNotification(notifyClose <-chan *amqp.Error, notifyCancel <-c
 			return channelNotification{cancelTag: tag, cancelled: true}
 		}
 		// amqp091-go closes NotifyClose before NotifyCancel on every channel
-		// shutdown. Preserve an abnormal close error when both are ready instead
-		// of randomly treating the closed cancel notifier as graceful shutdown.
+		// shutdown (this library never enables its automatic recovery, the one
+		// mode that leaves both open). Preserve an abnormal close error when both
+		// are ready instead of randomly treating the closed cancel notifier as
+		// graceful shutdown.
 		return channelNotification{closeErr: <-notifyClose}
 	}
 }
