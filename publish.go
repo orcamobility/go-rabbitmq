@@ -146,7 +146,6 @@ func (publisher *Publisher) recoverAfterReconnect(reconnectErr error) bool {
 		return false
 	}
 
-	publisher.options.Logger.Infof("successful publisher recovery from: %v", reconnectErr)
 	if err := publisher.startup(); err != nil {
 		if publisher.isClosed() {
 			return false
@@ -163,6 +162,7 @@ func (publisher *Publisher) recoverAfterReconnect(reconnectErr error) bool {
 	}
 	publisher.startReturnHandler()
 	publisher.startPublishHandler()
+	publisher.options.Logger.Infof("successful publisher recovery from: %v", reconnectErr)
 	return true
 }
 

@@ -129,3 +129,19 @@ func TestResetBackoffIfStableKeepsEscalationWhenFlapping(t *testing.T) {
 		t.Errorf("backoff reset to base %v despite a flapping channel", base)
 	}
 }
+
+func TestWaitForChannelNotificationGracefulCloseAndCancel(t *testing.T) {
+	closed := make(chan *amqp.Error)
+	close(closed)
+	cancelled := make(chan string)
+	close(cancelled)
+	if got := waitForChannelNotification(closed, cancelled); got.cancelled || got.closeErr != nil {
+		t.Fatalf("graceful close = %+v", got)
+	}
+	live := make(chan *amqp.Error)
+	tags := make(chan string, 1)
+	tags <- "consumer-tag"
+	if got := waitForChannelNotification(live, tags); !got.cancelled || got.cancelTag != "consumer-tag" {
+		t.Fatalf("broker cancel = %+v", got)
+	}
+}

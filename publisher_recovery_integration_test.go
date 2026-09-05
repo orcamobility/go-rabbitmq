@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"context"
 	"os/exec"
 	"sync/atomic"
 	"testing"
@@ -86,11 +87,21 @@ func TestPublisherKeepsRecoveringAfterFailedRedeclare(t *testing.T) {
 		WithPublisherOptionsExchangeDeclare,
 		WithPublisherOptionsExchangeKind("direct"),
 		WithPublisherOptionsExchangeDurable,
+		WithPublisherOptionsConfirm,
 		WithPublisherOptionsLogger(logger),
 	)
 	if err != nil {
 		t.Fatalf("error creating publisher: %v", err)
 	}
+
+	defer publisher.Close()
+	returns := make(chan Return, 1)
+	publisher.NotifyReturn(func(r Return) {
+		select {
+		case returns <- r:
+		default:
+		}
+	})
 
 	redeclareExchange(t, connStr, false)
 
@@ -114,11 +125,37 @@ func TestPublisherKeepsRecoveringAfterFailedRedeclare(t *testing.T) {
 
 	redeclareExchange(t, connStr, true)
 
+	rawConn, err := amqp.Dial(connStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawConn.Close()
+	rawCh, err := rawConn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := rawCh.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rawCh.QueueBind(queue.Name, "k", recoveryExchange, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	deliveries, err := rawCh.Consume(queue.Name, "", true, true, false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	deadline = time.Now().Add(15 * time.Second)
 	for {
-		err := publisher.Publish([]byte("x"), []string{"k"}, WithPublishOptionsExchange(recoveryExchange))
-		if err == nil {
-			break
+		confirms, err := publisher.PublishWithDeferredConfirmWithContext(ctx, []byte("x"), []string{"k"}, WithPublishOptionsExchange(recoveryExchange))
+		if err == nil && len(confirms) == 1 && confirms[0] != nil {
+			ack, err := confirms[0].WaitContext(ctx)
+			if err == nil && ack {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("publisher never recovered: %v", err)
@@ -126,8 +163,27 @@ func TestPublisherKeepsRecoveringAfterFailedRedeclare(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	select {
+	case d := <-deliveries:
+		if string(d.Body) != "x" {
+			t.Fatalf("unexpected delivery: %q", d.Body)
+		}
+	case <-ctx.Done():
+		t.Fatal("recovered publisher did not route a message")
+	}
+	if err := publisher.PublishWithContext(ctx, []byte("unroutable"), []string{"missing"}, WithPublishOptionsExchange(recoveryExchange), WithPublishOptionsMandatory); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-returns:
+		if r.ReplyCode != 312 || string(r.Body) != "unroutable" {
+			t.Fatalf("unexpected return: %+v", r)
+		}
+	case <-ctx.Done():
+		t.Fatal("return handler did not recover")
+	}
 	if logger.fatal.Load() {
-		t.Fatal("publisher escalated to Fatalf instead of waiting for the next reconnect")
+		t.Fatal("publisher escalated to Fatalf")
 	}
 
 	closed := make(chan struct{})

@@ -124,11 +124,11 @@ func TestPublisherResumesOnFlow(t *testing.T) {
 	resubscribe := make(chan bool, 1)
 	go func() { resubscribe <- publisher.consumeFlow(flow) }()
 
-	flow <- true
-	eventually(t, true, publisher.isFlowDisabled, "after basic.flow active")
-
 	flow <- false
-	eventually(t, false, publisher.isFlowDisabled, "after basic.flow inactive")
+	eventually(t, true, publisher.isFlowDisabled, "after basic.flow inactive")
+
+	flow <- true
+	eventually(t, false, publisher.isFlowDisabled, "after basic.flow active")
 
 	close(flow)
 	select {

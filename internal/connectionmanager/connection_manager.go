@@ -82,7 +82,7 @@ func NewConnectionManager(resolver Resolver, conf amqp.Config, log logger.Logger
 		dispatcher:           dispatcher.NewDispatcher(),
 		closeCh:              make(chan struct{}),
 	}
-	go connManager.startNotifyClose()
+	connManager.startNotifyClose()
 	return &connManager, nil
 }
 
@@ -122,21 +122,24 @@ func (connManager *ConnectionManager) CheckinConnection() {
 // Once reconnected, it sends an error back on the manager's notifyCancelOrClose
 // channel
 func (connManager *ConnectionManager) startNotifyClose() {
+	// Register before exposing the new channel/connection to callers or recovery.
 	notifyCloseChan := connManager.connection.NotifyClose(make(chan *amqp.Error, 1))
 
-	err := <-notifyCloseChan
-	if err != nil {
-		connManager.logger.Errorf("attempting to reconnect to amqp server after connection close with error: %v", err)
-		connManager.resetBackoffIfStable()
-		if !connManager.reconnectLoop() {
-			return
+	go func() {
+		err := <-notifyCloseChan
+		if err != nil {
+			connManager.logger.Errorf("attempting to reconnect to amqp server after connection close with error: %v", err)
+			connManager.resetBackoffIfStable()
+			if !connManager.reconnectLoop() {
+				return
+			}
+			connManager.logger.Warnf("successfully reconnected to amqp server")
+			connManager.dispatcher.Dispatch(err)
 		}
-		connManager.logger.Warnf("successfully reconnected to amqp server")
-		connManager.dispatcher.Dispatch(err)
-	}
-	if err == nil {
-		connManager.logger.Infof("amqp connection closed gracefully")
-	}
+		if err == nil {
+			connManager.logger.Infof("amqp connection closed gracefully")
+		}
+	}()
 }
 
 // GetReconnectionCount -
@@ -187,7 +190,7 @@ func (connManager *ConnectionManager) reconnectLoop() bool {
 		default:
 		}
 		connManager.incrementReconnectionCount()
-		go connManager.startNotifyClose()
+		connManager.startNotifyClose()
 		return true
 	}
 }
