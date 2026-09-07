@@ -58,8 +58,10 @@ func waitForBrokerReady(t *testing.T, containerID string) {
 	var lastOut []byte
 	var lastErr error
 	for time.Now().Before(deadline) {
-		cmd := exec.Command("docker", "exec", "--user", "rabbitmq", containerID, "rabbitmqctl", "await_startup")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cmd := exec.CommandContext(ctx, "docker", "exec", "--user", "rabbitmq", containerID, "rabbitmqctl", "--timeout", "8", "await_startup")
 		lastOut, lastErr = cmd.CombinedOutput()
+		cancel()
 		if lastErr == nil {
 			return
 		}

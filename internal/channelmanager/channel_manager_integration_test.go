@@ -99,3 +99,38 @@ func TestCloseDuringReconnectStopsReconnectLoop(t *testing.T) {
 		t.Fatal("channel manager installed a new open channel after Close: leaked channel")
 	}
 }
+
+func TestAbnormalChannelCloseReconnects(t *testing.T) {
+	connStr := prepareDockerTest(t)
+	connManager := waitForConnectionManager(t, connStr)
+	defer connManager.Close()
+
+	reconnectInterval := 500 * time.Millisecond
+	chanManager, err := NewChannelManager(connManager, testLogger{t}, reconnectInterval, reconnectInterval)
+	if err != nil {
+		t.Fatalf("error creating channel manager: %v", err)
+	}
+	defer chanManager.Close()
+
+	reconnected, unsubscribe := chanManager.NotifyReconnect()
+	defer func() { unsubscribe <- struct{}{} }()
+
+	// A passive declaration of a missing queue makes RabbitMQ close the channel
+	// abnormally. amqp091-go then makes both close and cancel notifiers ready.
+	if _, err := chanManager.QueueDeclarePassiveSafe("no-such-queue", false, false, false, false, nil); err == nil {
+		t.Fatal("expected passive declare of missing queue to fail")
+	}
+
+	select {
+	case err := <-reconnected:
+		if err == nil {
+			t.Fatal("reconnect notification did not contain the channel close error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("channel did not reconnect after abnormal close")
+	}
+
+	if got := chanManager.GetReconnectionCount(); got != 1 {
+		t.Fatalf("reconnection count = %d, want 1", got)
+	}
+}
