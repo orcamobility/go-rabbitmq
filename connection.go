@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"errors"
 	"math/rand"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -18,7 +19,7 @@ type Conn struct {
 	options ConnectionOptions
 }
 
-// Config wraps amqp.Config
+// Config wraps amqp.Config. Recovery must be nil: this library owns reconnection.
 // Config is used in DialConfig and Open to specify the desired tuning
 // parameters used during a connection open handshake.  The negotiated tuning
 // will be stored in the returned connection's Config field.
@@ -58,6 +59,11 @@ func NewClusterConn(resolver Resolver, opts ...func(*ConnectionOptions)) (*Conn,
 	options := &defaultOptions
 	for _, optFn := range opts {
 		optFn(options)
+	}
+
+	// This library owns reconnection and topology; a second recovery loop races it.
+	if options.Config.Recovery != nil {
+		return nil, errors.New("amqp automatic recovery is not supported; go-rabbitmq manages recovery")
 	}
 
 	manager, err := connectionmanager.NewConnectionManager(resolver, amqp.Config(options.Config), options.Logger, options.ReconnectInterval, options.ReconnectMaxInterval)

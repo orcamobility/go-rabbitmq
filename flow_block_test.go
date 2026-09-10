@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -103,6 +104,17 @@ func TestPublisherConsumeBlockingsStopsOnClose(t *testing.T) {
 	}
 }
 
+func TestPublisherDoesNotRecoverAfterClose(t *testing.T) {
+	publisher := newFlowBlockTestPublisher()
+	close(publisher.done)
+
+	// A reconnect dispatch can already be in flight when Close closes done.
+	// The nil channel manager makes any attempted startup fail this test loudly.
+	if publisher.recoverAfterReconnect(errors.New("reconnected")) {
+		t.Fatal("closed publisher accepted a reconnect dispatch")
+	}
+}
+
 // TestPublisherResumesOnFlow mirrors the unblock test for channel-level flow
 // control (basic.flow).
 func TestPublisherResumesOnFlow(t *testing.T) {
@@ -112,11 +124,11 @@ func TestPublisherResumesOnFlow(t *testing.T) {
 	resubscribe := make(chan bool, 1)
 	go func() { resubscribe <- publisher.consumeFlow(flow) }()
 
-	flow <- true
-	eventually(t, true, publisher.isFlowDisabled, "after basic.flow active")
-
 	flow <- false
-	eventually(t, false, publisher.isFlowDisabled, "after basic.flow inactive")
+	eventually(t, true, publisher.isFlowDisabled, "after basic.flow inactive")
+
+	flow <- true
+	eventually(t, false, publisher.isFlowDisabled, "after basic.flow active")
 
 	close(flow)
 	select {

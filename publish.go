@@ -130,21 +130,49 @@ func NewPublisher(conn *Conn, optionFuncs ...func(*PublisherOptions)) (*Publishe
 		})
 	}
 
-	go func() {
-		for err := range publisher.reconnectErrCh {
-			publisher.options.Logger.Infof("successful publisher recovery from: %v", err)
-			err := publisher.startup()
-			if err != nil {
-				publisher.options.Logger.Fatalf("error on startup for publisher after cancel or close: %v", err)
-				publisher.options.Logger.Fatalf("publisher closing, unable to recover")
-				return
-			}
-			publisher.startReturnHandler()
-			publisher.startPublishHandler()
-		}
-	}()
+	go publisher.handleReconnects()
 
 	return publisher, nil
+}
+
+func (publisher *Publisher) handleReconnects() {
+	for err := range publisher.reconnectErrCh {
+		publisher.recoverAfterReconnect(err)
+	}
+}
+
+func (publisher *Publisher) recoverAfterReconnect(reconnectErr error) bool {
+	if publisher.isClosed() {
+		return false
+	}
+
+	if err := publisher.startup(); err != nil {
+		if publisher.isClosed() {
+			return false
+		}
+		// A failed redeclare either closed the channel (broker exception) or
+		// followed a lost connection, so the channel manager reconnects again and
+		// this runs again with backoff. Exiting the process here took every other
+		// channel in the pod down with it (INC-357).
+		publisher.options.Logger.Errorf("publisher recovery failed, waiting for the next reconnect: %v", err)
+		return false
+	}
+	if publisher.isClosed() {
+		return false
+	}
+	publisher.startReturnHandler()
+	publisher.startPublishHandler()
+	publisher.options.Logger.Infof("successful publisher recovery from: %v", reconnectErr)
+	return true
+}
+
+func (publisher *Publisher) isClosed() bool {
+	select {
+	case <-publisher.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (publisher *Publisher) startup() error {

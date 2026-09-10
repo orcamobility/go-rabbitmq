@@ -13,6 +13,11 @@ import (
 const enableDockerIntegrationTestsFlag = `ENABLE_DOCKER_INTEGRATION_TESTS`
 
 func prepareDockerTest(t *testing.T) (connStr string) {
+	connStr, _ = prepareDockerTestWithContainerID(t)
+	return connStr
+}
+
+func prepareDockerTestWithContainerID(t *testing.T) (connStr string, containerID string) {
 	if v, ok := os.LookupEnv(enableDockerIntegrationTestsFlag); !ok || strings.ToUpper(v) != "TRUE" {
 		t.Skipf("integration tests are only run if '%s' is TRUE", enableDockerIntegrationTestsFlag)
 		return
@@ -25,14 +30,14 @@ func prepareDockerTest(t *testing.T) (connStr string) {
 		t.Log("container id", string(out))
 		t.Fatalf("error launching rabbitmq in docker: %v", err)
 	}
+	containerId := strings.TrimSpace(string(out))
 	t.Cleanup(func() {
-		containerId := strings.TrimSpace(string(out))
 		t.Logf("attempting to shutdown container '%s'", containerId)
 		if err := exec.Command("docker", "rm", "--force", containerId).Run(); err != nil {
 			t.Logf("failed to stop: %v", err)
 		}
 	})
-	return "amqp://guest:guest@localhost:5672/"
+	return "amqp://guest:guest@localhost:5672/", containerId
 }
 
 func waitForHealthyAmqp(t *testing.T, connStr string) *Conn {

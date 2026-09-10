@@ -88,12 +88,12 @@ func (publisher *Publisher) consumeFlow(notifyFlowChan <-chan bool) (resubscribe
 			if !open {
 				return true
 			}
-			if ok {
+			if !ok {
 				publisher.options.Logger.Warnf("pausing publishing due to flow request from server")
 			} else {
 				publisher.options.Logger.Warnf("resuming publishing due to flow request from server")
 			}
-			publisher.setFlow(ok)
+			publisher.setFlow(!ok)
 		}
 	}
 }

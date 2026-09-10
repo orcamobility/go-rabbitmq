@@ -53,7 +53,7 @@ func NewChannelManager(connManager *connectionmanager.ConnectionManager, log log
 		dispatcher:          dispatcher.NewDispatcher(),
 		closeCh:             make(chan struct{}),
 	}
-	go chanManager.startNotifyCancelOrClosed()
+	chanManager.startNotifyCancelOrClosed()
 	return &chanManager, nil
 }
 
@@ -73,36 +73,59 @@ func getNewChannel(connManager *connectionmanager.ConnectionManager) (*amqp.Chan
 // Once reconnected, it sends an error back on the manager's notifyCancelOrClose
 // channel
 func (chanManager *ChannelManager) startNotifyCancelOrClosed() {
+	// Register before exposing the new channel/connection to callers or recovery.
 	notifyCloseChan := chanManager.channel.NotifyClose(make(chan *amqp.Error, 1))
 	notifyCancelChan := chanManager.channel.NotifyCancel(make(chan string, 1))
 
-	select {
-	case err := <-notifyCloseChan:
-		if err != nil {
-			chanManager.logger.Errorf("attempting to reconnect to amqp server after close with error: %v", err)
-			chanManager.resetBackoffIfStable()
-			if !chanManager.reconnectLoop() {
-				return
+	go func() {
+		notification := waitForChannelNotification(notifyCloseChan, notifyCancelChan)
+		if !notification.cancelled {
+			err := notification.closeErr
+			if err != nil {
+				chanManager.logger.Errorf("attempting to reconnect to amqp server after close with error: %v", err)
+				chanManager.resetBackoffIfStable()
+				if !chanManager.reconnectLoop() {
+					return
+				}
+				chanManager.logger.Warnf("successfully reconnected to amqp server")
+				chanManager.dispatcher.Dispatch(err)
 			}
-			chanManager.logger.Warnf("successfully reconnected to amqp server")
-			chanManager.dispatcher.Dispatch(err)
-		}
-		if err == nil {
-			chanManager.logger.Infof("amqp channel closed gracefully")
-		}
-	case err, ok := <-notifyCancelChan:
-		if !ok {
-			// closing the amqp channel closes both notifiers; a zero-value
-			// receive here is shutdown, not a server-side cancel
+			if err == nil {
+				chanManager.logger.Infof("amqp channel closed gracefully")
+			}
 			return
 		}
-		chanManager.logger.Errorf("attempting to reconnect to amqp server after cancel with error: %s", err)
+
+		chanManager.logger.Errorf("attempting to reconnect to amqp server after cancel with error: %s", notification.cancelTag)
 		chanManager.resetBackoffIfStable()
 		if !chanManager.reconnectLoop() {
 			return
 		}
 		chanManager.logger.Warnf("successfully reconnected to amqp server after cancel")
-		chanManager.dispatcher.Dispatch(errors.New(err))
+		chanManager.dispatcher.Dispatch(errors.New(notification.cancelTag))
+	}()
+}
+
+type channelNotification struct {
+	closeErr  *amqp.Error
+	cancelTag string
+	cancelled bool
+}
+
+func waitForChannelNotification(notifyClose <-chan *amqp.Error, notifyCancel <-chan string) channelNotification {
+	select {
+	case err := <-notifyClose:
+		return channelNotification{closeErr: err}
+	case tag, ok := <-notifyCancel:
+		if ok {
+			return channelNotification{cancelTag: tag, cancelled: true}
+		}
+		// amqp091-go closes NotifyClose before NotifyCancel on every channel
+		// shutdown (this library never enables its automatic recovery, the one
+		// mode that leaves both open). Preserve an abnormal close error when both
+		// are ready instead of randomly treating the closed cancel notifier as
+		// graceful shutdown.
+		return channelNotification{closeErr: <-notifyClose}
 	}
 }
 
@@ -155,7 +178,7 @@ func (chanManager *ChannelManager) reconnectLoop() bool {
 		default:
 		}
 		chanManager.incrementReconnectionCount()
-		go chanManager.startNotifyCancelOrClosed()
+		chanManager.startNotifyCancelOrClosed()
 		return true
 	}
 }

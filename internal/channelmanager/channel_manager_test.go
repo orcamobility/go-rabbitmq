@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/wagslane/go-rabbitmq/internal/backoff"
 )
 
@@ -69,6 +70,22 @@ func TestReconnectRefusesWhenClosed(t *testing.T) {
 	}
 }
 
+func TestWaitForChannelNotificationPreservesAbnormalClose(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		want := &amqp.Error{Code: 501, Reason: "connection reset"}
+		notifyClose := make(chan *amqp.Error, 1)
+		notifyClose <- want
+		close(notifyClose)
+		notifyCancel := make(chan string)
+		close(notifyCancel)
+
+		got := waitForChannelNotification(notifyClose, notifyCancel)
+		if got.cancelled || got.closeErr != want {
+			t.Fatalf("notification = %+v, want abnormal close %v", got, want)
+		}
+	}
+}
+
 // A channel that had been up longer than stableAfter is treated as healthy, so
 // the next outage retries promptly from the base interval.
 func TestResetBackoffIfStableResetsAfterStableChannel(t *testing.T) {
@@ -110,5 +127,21 @@ func TestResetBackoffIfStableKeepsEscalationWhenFlapping(t *testing.T) {
 	}
 	if !escalated {
 		t.Errorf("backoff reset to base %v despite a flapping channel", base)
+	}
+}
+
+func TestWaitForChannelNotificationGracefulCloseAndCancel(t *testing.T) {
+	closed := make(chan *amqp.Error)
+	close(closed)
+	cancelled := make(chan string)
+	close(cancelled)
+	if got := waitForChannelNotification(closed, cancelled); got.cancelled || got.closeErr != nil {
+		t.Fatalf("graceful close = %+v", got)
+	}
+	live := make(chan *amqp.Error)
+	tags := make(chan string, 1)
+	tags <- "consumer-tag"
+	if got := waitForChannelNotification(live, tags); !got.cancelled || got.cancelTag != "consumer-tag" {
+		t.Fatalf("broker cancel = %+v", got)
 	}
 }
