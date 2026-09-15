@@ -77,7 +77,11 @@ func (m *ChannelManager) publishWithConfirmedRouting(
 	if m.failedConfirm {
 		return nil, amqp.ErrClosed
 	}
-	confirmation, err := m.channel.PublishWithDeferredConfirmWithContext(ctx, exchange, key, mandatory, immediate, msg)
+	// Separate cancellation before send from a write with an uncertain outcome.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	confirmation, err := m.channel.PublishWithDeferredConfirm(exchange, key, mandatory, immediate, msg)
 	if err != nil {
 		m.failedConfirm = true
 		return nil, err

@@ -195,6 +195,99 @@ func TestConfirmedRoutingSerializesRecoverySetup(t *testing.T) {
 	}
 }
 
+func TestConfirmedRoutingCancellationDuringSetup(t *testing.T) {
+	address := confirmedRoutingAddress(t)
+	for _, deadline := range []bool{false, true} {
+		name := "cancelled"
+		if deadline {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			setup := make(chan struct{})
+			release := make(chan struct{})
+			var once, releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			var sends atomic.Int32
+			conn := newConfirmFrameConnection(t, address, func(class, method uint16) bool {
+				if class == 85 && method == 11 {
+					once.Do(func() { close(setup); <-release })
+				}
+				return false
+			}, func(class, method uint16) {
+				if class == 60 && method == 40 {
+					sends.Add(1)
+				}
+			})
+			p, err := NewPublisher(conn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			defer unblock()
+			raw, err := amqp.Dial(address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			ch, err := raw.Channel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			queue, err := ch.QueueDeclare("", false, true, true, false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			wantErr := context.Canceled
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+				wantErr = context.DeadlineExceeded
+			}
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				_, err := p.PublishWithConfirmedRoutingWithContext(ctx, []byte("cancelled"), []string{queue.Name}, WithPublishOptionsMandatory)
+				result <- err
+			}()
+			select {
+			case <-setup:
+			case <-time.After(3 * time.Second):
+				t.Fatal("confirm setup did not start")
+			}
+			if deadline {
+				<-ctx.Done()
+			} else {
+				cancel()
+			}
+			unblock()
+			if err := <-result; !errors.Is(err, wantErr) {
+				t.Fatalf("want %v, got %v", wantErr, err)
+			}
+			if sends.Load() != 0 {
+				t.Fatal("cancelled request sent a publish frame")
+			}
+			ctx, finish := context.WithTimeout(context.Background(), 3*time.Second)
+			defer finish()
+			cs, err := p.PublishWithConfirmedRoutingWithContext(ctx, []byte("valid"), []string{queue.Name}, WithPublishOptionsMandatory)
+			if err != nil || len(cs) != 1 || !cs[0].Acked() {
+				t.Fatalf("valid publish after cancelled setup was not confirmed: %v", err)
+			}
+			msg, ok, err := ch.Get(queue.Name, true)
+			if err != nil || !ok || string(msg.Body) != "valid" {
+				t.Fatalf("wrong delivery after cancelled setup: %v %t %q", err, ok, msg.Body)
+			}
+			if _, ok, err := ch.Get(queue.Name, true); err != nil || ok {
+				t.Fatalf("cancelled request reached the queue: %v %t", err, ok)
+			}
+			if sends.Load() != 1 || p.chanManager.GetReconnectionCount() != 0 {
+				t.Fatal("expected one publish on the original channel")
+			}
+		})
+	}
+}
+
 func TestConfirmedRoutingCancellationRequiresNewChannel(t *testing.T) {
 	var dropAck atomic.Bool
 	dropAck.Store(true)
