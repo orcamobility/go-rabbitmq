@@ -265,6 +265,24 @@ func (publisher *Publisher) PublishWithDeferredConfirmWithContext(
 	routingKeys []string,
 	optionFuncs ...func(*PublishOptions),
 ) (PublisherConfirmation, error) {
+	return publisher.publishWithDeferredConfirm(ctx, data, routingKeys, false, optionFuncs...)
+}
+
+// PublishWithConfirmedRoutingWithContext waits for confirms and reports mandatory
+// returns as errors. Do not mix it with other publish methods on this publisher.
+// The transport must interrupt blocked writes when ctx is cancelled.
+func (publisher *Publisher) PublishWithConfirmedRoutingWithContext(
+	ctx context.Context, data []byte, routingKeys []string, optionFuncs ...func(*PublishOptions),
+) (PublisherConfirmation, error) {
+	return publisher.publishWithDeferredConfirm(ctx, data, routingKeys, true, optionFuncs...)
+}
+
+// ReturnedError means the broker could not route the message to a queue.
+type ReturnedError = channelmanager.ReturnedError
+
+func (publisher *Publisher) publishWithDeferredConfirm(
+	ctx context.Context, data []byte, routingKeys []string, checkRouting bool, optionFuncs ...func(*PublishOptions),
+) (PublisherConfirmation, error) {
 	publisher.disablePublishDueToFlowMu.RLock()
 	defer publisher.disablePublishDueToFlowMu.RUnlock()
 	if publisher.disablePublishDueToFlow {
@@ -305,7 +323,11 @@ func (publisher *Publisher) PublishWithDeferredConfirmWithContext(
 		message.AppId = options.AppID
 
 		// Actual publish.
-		conf, err := publisher.chanManager.PublishWithDeferredConfirmWithContextSafe(
+		publish := publisher.chanManager.PublishWithDeferredConfirmWithContextSafe
+		if checkRouting {
+			publish = publisher.chanManager.PublishWithConfirmedRoutingWithContextSafe
+		}
+		conf, err := publish(
 			ctx,
 			options.Exchange,
 			routingKey,

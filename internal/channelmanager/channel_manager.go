@@ -18,6 +18,10 @@ type ChannelManager struct {
 	channel             *amqp.Channel
 	connManager         *connectionmanager.ConnectionManager
 	channelMu           *sync.RWMutex
+	confirmedPublish    chan struct{}
+	returnChannel       *amqp.Channel
+	returns             <-chan amqp.Return
+	failedConfirm       bool
 	connectedAt         time.Time
 	stableAfter         time.Duration
 	reconnectBackoff    *backoff.Exponential
@@ -40,6 +44,7 @@ func NewChannelManager(connManager *connectionmanager.ConnectionManager, log log
 		connManager:         connManager,
 		channel:             ch,
 		channelMu:           &sync.RWMutex{},
+		confirmedPublish:    make(chan struct{}, 1),
 		connectedAt:         time.Now(),
 		stableAfter:         reconnectMaxInterval,
 		reconnectBackoff:    backoff.New(reconnectInterval, reconnectMaxInterval),
