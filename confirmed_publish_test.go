@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -12,10 +11,7 @@ import (
 )
 
 func TestConfirmedRouting(t *testing.T) {
-	address := os.Getenv("TEST_AMQP_URL")
-	if address == "" {
-		t.Skip("TEST_AMQP_URL is required")
-	}
+	address := confirmedRoutingAddress(t)
 	conn, err := NewConn(address)
 	if err != nil {
 		t.Fatal(err)
