@@ -27,6 +27,9 @@ func (m *ChannelManager) PublishWithConfirmedRoutingWithContextSafe(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := msg.Headers.Validate(); err != nil {
+		return nil, err
+	}
 	if m.returnChannel != m.channel {
 		if err := m.channel.Confirm(false); err != nil {
 			return nil, err

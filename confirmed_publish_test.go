@@ -46,6 +46,26 @@ func TestConfirmedRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := []func(*PublishOptions){WithPublishOptionsExchange(exchange), WithPublishOptionsMandatory}
+	t.Run("invalid_headers_then_success", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		invalid := append(append([]func(*PublishOptions){}, options...), WithPublishOptionsHeaders(Table{"bad": make(chan int)}))
+		_, err := p.PublishWithConfirmedRoutingWithContext(ctx, []byte("invalid"), []string{"routed"}, invalid...)
+		if err == nil || errors.Is(err, amqp.ErrClosed) {
+			t.Fatalf("want header validation error, got %v", err)
+		}
+		confirmations, err := p.PublishWithConfirmedRoutingWithContext(ctx, []byte("valid"), []string{"routed"}, options...)
+		if err != nil || len(confirmations) != 1 || !confirmations[0].Acked() {
+			t.Fatalf("valid message after invalid headers was not confirmed: %v", err)
+		}
+		msg, ok, err := ch.Get(queue.Name, true)
+		if err != nil || !ok || string(msg.Body) != "valid" {
+			t.Fatalf("want only valid message, got %v, %t, %q", err, ok, msg.Body)
+		}
+		if _, ok, err := ch.Get(queue.Name, true); err != nil || ok {
+			t.Fatalf("invalid message reached queue: %v, %t", err, ok)
+		}
+	})
 	for i := 0; i < 30; i++ {
 		t.Run(fmt.Sprintf("return_then_success_%d", i), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
