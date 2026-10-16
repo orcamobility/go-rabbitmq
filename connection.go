@@ -87,6 +87,20 @@ func (conn *Conn) handleRestarts() {
 	}
 }
 
+// NotifyReconnect subscribes to successful connection recoveries, excluding the
+// initial connection. Each call creates an independent subscription. The received
+// error describes the disconnect that preceded recovery, not a recovery failure.
+// Publisher and consumer channels may still be recovering when the event arrives.
+//
+// Drain notifications promptly: the existing dispatcher waits up to five seconds
+// for each subscriber before dropping its notification.
+//
+// Send once on the second channel to unsubscribe, including before closing Conn.
+// Keep receiving until the notification channel closes to allow cleanup to finish.
+func (conn *Conn) NotifyReconnect() (<-chan error, chan<- struct{}) {
+	return conn.connectionManager.NotifyReconnect()
+}
+
 // Close closes the connection, it's not safe for re-use.
 // You should also close any consumers and publishers before
 // closing the connection
